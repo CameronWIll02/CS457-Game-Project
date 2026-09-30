@@ -22,6 +22,8 @@ their own pace. For example, player 2 can be in `AWAITING_SWITCH` after a faint
 while player 1 is already in `AWAITING_MOVES` and has locked in their next move.
 The round resolves only when **both** regions have finished.
 
+"For rubric alignment: READINESS (containing the per-player AWAITING_MOVES/AWAITING_SWITCH regions) corresponds to the rubric's PLAYER_TURN state, and EVALUATE_ROUND corresponds to EVALUATE_MOVE."
+
 ---
 
 ## 2. State Diagram
