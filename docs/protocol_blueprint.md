@@ -131,7 +131,8 @@ The message schemas below reuse these objects.
 ### 3.4 Player roles
 
 Roles are always the strings `"player1"` or `"player2"`. The server assigns them in
-connection order. All per-player objects are keyed by role.
+lobby queue order: when a game starts, the first player in the queue becomes
+`player1` and the second becomes `player2`. All per-player objects are keyed by role.
 
 ---
 
@@ -306,6 +307,7 @@ in `AWAITING_SWITCH`. Voluntary mid-battle switching is out of scope.
 | `active` | object | `{ "player1": ActiveSummary, "player2": ActiveSummary }` |
 | `events` | array[string] | Short, ordered log of what just happened (can be empty). |
 | `awaiting` | object | `{ "player1": string \| null, "player2": string \| null }`. Each value is `"MOVE"`, `"SWITCH"`, or `null` (nothing required from that player right now). |
+| `remaining` | object | `{ "player1": int, "player2": int }`. Count of non-fainted Pokémon on each side. |
 
 ```json
 {
@@ -320,7 +322,8 @@ in `AWAITING_SWITCH`. Voluntary mid-battle switching is out of scope.
     "Charizard used Flamethrower!",
     "Alakazam fainted!"
   ],
-  "awaiting": {"player1": "MOVE", "player2": "SWITCH"}
+  "awaiting": {"player1": "MOVE", "player2": "SWITCH"},
+  "remaining": {"player1": 3, "player2": 1}
 }
 ```
 
@@ -384,6 +387,7 @@ to `WAITING_FOR_PLAYERS`.
 | `result` | string | `"WIN"` (a side ran out of usable Pokémon), `"DRAW"` (both sides ran out in the same round), or `"FORFEIT"` (the opponent disconnected). |
 | `winner` | string \| null | Winning role (`"player1"` / `"player2"`), or `null` on a `DRAW`. |
 | `final_state` | object | `{ "round": int, "teams": { "player1": array[ActiveSummary], "player2": array[ActiveSummary] } }`. Every team member's final HP and status. |
+| `record` | object | `{ "<player_name>": { "wins": int, "losses": int, "draws": int }, ... }` for both players. Match record including this game's result. |
 
 ```json
 {
@@ -404,6 +408,10 @@ to `WAITING_FOR_PLAYERS`.
         {"species": "Gengar", "hp": 0, "max_hp": 60, "status": "FNT"}
       ]
     }
+  },
+  "record": {
+    "Red": {"wins": 2, "losses": 1, "draws": 0},
+    "Blue": {"wins": 1, "losses": 2, "draws": 0}
   }
 }
 ```
@@ -482,3 +490,9 @@ Rules for every send and receive path:
   the survivor, and moves the server to `CLEANUP`.
 - The client side follows the same rules. If the server connection drops, the
   client reports "connection lost" and exits cleanly instead of hanging.
+
+---
+
+## Changelog
+
+- **Sprint 2:** added `STATE_UPDATE.remaining` and `GAME_OVER.record` for score synchronization.

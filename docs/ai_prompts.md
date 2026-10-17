@@ -100,7 +100,175 @@ invent additional message types or states beyond what's specified above.
 
 ---
 
-## 4. Sprint 3 Prompt – Code Generation (Placeholder)
+## 4. Sprint 2 Prompt – Concurrency Design
+
+**Used to generate:** `docs/concurrency_design.md`, the Sprint 2 addendum to `docs/protocol_blueprint.md`, and this section of `docs/ai_prompts.md`
+**Constraint goal:** have the AI write up my concurrency design without changing it, and keep it consistent with the Sprint 1 protocol and FSM.
+
+**Design ownership:** I made these decisions **before I wrote the prompt below**:
+
+- the threading model (one daemon worker thread per client, with the main thread only
+  running `accept()`),
+- the single-lock strategy (one `game_lock` for all shared state, with `recv()` always outside it),
+- sending broadcasts while holding the lock,
+- deferred forfeit handling for send failures (record the failed player, then call
+  `on_player_left()` after releasing the lock),
+- the score and record design (`STATE_UPDATE.remaining` and the `GAME_OVER.record`
+  match record keyed by player name).
+
+The AI's job was to write up and format those decisions, not to make them.
+
+```text
+I'm writing Sprint 2 design docs for my CS 457 Computer Networks project: a Gen 1
+Pokémon battle simulator over TCP (2 clients, 1 server). Sprint 1 docs already exist
+in docs/: protocol_blueprint.md, fsm_specification.md, ai_prompts.md. Read all three
+first. Everything below must stay consistent with them: same message names, fields,
+error codes, state names, and newline-delimited JSON framing. Do not invent new
+message types, error codes, or FSM states. Match their formatting style.
+
+All design decisions below are mine. Your job is to write them up clearly, not to
+change them.
+
+=== TASK 1: Create docs/concurrency_design.md ===
+
+1. Concurrency model: multi-threading, one worker thread per client connection.
+   - Main thread: creates the listening socket (bind/listen), loops on accept(),
+     and spawns a daemon threading.Thread running client_loop(conn, addr) for
+     each connection. The main thread never blocks on a client socket, so the
+     server keeps accepting while games run.
+   - Explain why I chose threading over selectors: the Sprint 1 protocol
+     blueprint already specifies a blocking per-client receive loop
+     (client_loop), which maps directly onto thread-per-client. Briefly note the
+     tradeoff (selectors needs no locks but a different code structure).
+   - Capacity: the game needs exactly 2 players. A third connection while a game
+     is running waits in the lobby (receives LOBBY_WAIT) until CLEANUP returns
+     the server to WAITING_FOR_PLAYERS.
+
+2. Connection lifecycle, step by step: accept() → spawn thread → CONNECT received
+   → register in lobby (under lock) → LOBBY_WAIT or GAME_START → in-game message
+   servicing → teardown via DISCONNECT, 0-byte recv (FIN), or socket exception
+   (RST), all converging on the finally block calling on_player_left() exactly
+   as described in protocol_blueprint.md section 5.
+
+3. Shared resources inventory. Make a table listing each one, which threads read
+   or write it, and what goes wrong if it's unprotected:
+   - lobby / connected-client list (player name → socket, role)
+   - FSM state (current server state)
+   - teams (both players' Pokémon, HP, status)
+   - per-player readiness (each player's AWAITING_MOVES / AWAITING_SWITCH /
+     locked-in region state) and pending locked-in moves
+   - round counter
+   - remaining-Pokémon counts (per-battle score)
+   - match record (wins/losses/draws per player name, persists across
+     rematches, in memory only while the server process runs)
+
+4. Locking strategy:
+   - A single threading.Lock named game_lock protects ALL shared resources
+     above. Explain why one coarse lock is the right choice here: only 2
+     players, short critical sections, and it eliminates lock-ordering
+     deadlocks entirely.
+   - recv() always happens OUTSIDE the lock (never block on the network while
+     holding it). Only after a complete NDJSON line is parsed does the thread
+     acquire game_lock.
+   - Critical section for handling a message: acquire game_lock → validate the
+     message against the current FSM state and that player's readiness →
+     mutate state → if both players are now locked in, resolve the round
+     (EVALUATE_ROUND → CHECK_FAINT → CHECK_WIN_DRAW) inside the same critical
+     section → build outgoing messages → send them → release.
+   - Broadcasts are sent WHILE holding game_lock with sendall(). Justify: this
+     guarantees both clients receive every STATE_UPDATE in the same order and
+     no other thread can mutate state between the two sends. Acknowledge the
+     tradeoff that a slow client delays the lock briefly, which is acceptable
+     for a 2-player game.
+   - Send failures during a broadcast (BrokenPipeError / ConnectionResetError /
+     ConnectionAbortedError) must NOT call on_player_left() from inside the
+     locked section (threading.Lock is not reentrant, so that would
+     deadlock). Instead, record the failed player and handle the forfeit right
+     after releasing the lock.
+   - Use `with game_lock:` blocks so the lock is released even if an exception
+     is raised.
+
+5. Race conditions and how the lock prevents each. Give a short scenario for each:
+   - Both players' final MOVEs arrive at the same moment: without the lock,
+     both threads could see "both locked in" and resolve the round twice. With
+     it, exactly one thread resolves and the other sees the round already
+     advanced.
+   - A player double-sends MOVE: the second is rejected with OUT_OF_TURN
+     because the lock-in check and the write are atomic.
+   - One player disconnects while the other's MOVE is resolving: the forfeit
+     waits for the lock, then sees the current state.
+   - Both players disconnect at nearly the same time: the forfeit/GAME_OVER
+     logic checks the FSM state under the lock, so GAME_OVER and CLEANUP happen
+     exactly once.
+   - Two clients CONNECT at once: role assignment (player1/player2) happens
+     under the lock, so both can't become player1.
+
+6. Turn enforcement: summarize how every MOVE/SWITCH is checked under the lock
+   against that player's own readiness region before any state is touched.
+   Rejected messages produce ERROR to that client only, with no state change
+   and the opponent's locked-in move preserved. Reference the edge-case table
+   in fsm_specification.md rather than duplicating it.
+
+7. Score and leaderboard synchronization:
+   - Per-battle score: remaining (non-fainted) Pokémon count per side, stored
+     server-side and recomputed in CHECK_FAINT.
+   - Match record: dict keyed by player_name → {wins, losses, draws}, updated
+     exactly once per game inside the critical section that builds GAME_OVER
+     (including FORFEIT results). Note the limitation that it's keyed by
+     display name and lives in memory only.
+   - Both are broadcast to both clients: remaining counts in every
+     STATE_UPDATE, the match record in every GAME_OVER.
+
+8. A Mermaid sequenceDiagram (in this same file) with participants: Client 1
+   (player1), Game Server, Client 2 (player2). Use autonumber. Show:
+   - Client 1 sends MOVE. Note over the server: acquire game_lock, validate.
+     Use an alt/else block:
+       alt valid → note "player1 locked in, waiting for player2", server
+       sends nothing yet, releases lock
+       else invalid move or out of turn → ERROR to Client 1 only, state
+       unchanged
+   - Client 2 sends MOVE. Note: acquire game_lock, validate.
+       alt valid and both locked in → note: resolve round by speed order,
+       apply damage, check faints, update remaining counts → STATE_UPDATE to
+       Client 1 and STATE_UPDATE to Client 2 (with the identical payload,
+       including the remaining counts) → release lock
+       else invalid → ERROR to Client 2 only, player1's locked-in move kept
+   - An opt block for when a side has no Pokémon left: GAME_OVER to both
+     clients including the updated match record.
+   Keep the syntax conservative (no HTML except <br> in notes) so it renders
+   on GitHub. Below the diagram, add a short numbered narrative explaining
+   each step.
+
+=== TASK 2: Minimal addendum to docs/protocol_blueprint.md ===
+- Add a "remaining" field to the STATE_UPDATE schema:
+  {"player1": int, "player2": int} = count of non-fainted Pokémon per side.
+  Update its key table and sample payload.
+- Add a "record" field to the GAME_OVER schema:
+  {"<player_name>": {"wins": int, "losses": int, "draws": int}, ...} for both
+  players. Update its key table and sample payload.
+- Add a short "Changelog" note at the bottom: "Sprint 2: added
+  STATE_UPDATE.remaining and GAME_OVER.record for score synchronization."
+- Change nothing else in the file.
+
+=== TASK 3: Update docs/ai_prompts.md ===
+- Add a "Sprint 2 Prompt – Concurrency Design" section ABOVE the existing
+  Sprint 3 placeholder, containing this exact prompt. Add a design ownership
+  note there: the threading model, the single-lock strategy, send-under-lock
+  broadcasting, deferred forfeit handling, and the score/record design were my
+  decisions before this prompt was written.
+- Leave the Sprint 3 placeholder as is.
+```
+
+**Notes / deviations from the generated docs:**
+
+- The sequence diagram uses a nested `alt` / `else` (`STATE_UPDATE` if the game
+  continues, `GAME_OVER` if it is decided) instead of a `STATE_UPDATE` followed by
+  an `opt` block. Per the FSM, `CHECK_WIN_DRAW` sends `STATE_UPDATE` only when the game
+  continues and goes straight to `GAME_OVER` otherwise.
+
+---
+
+## 5. Sprint 3 Prompt – Code Generation (Placeholder)
 
 > **TODO (Sprint 3):** Insert the exact prompt used to constrain AI code generation.
 

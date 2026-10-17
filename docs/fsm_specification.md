@@ -127,7 +127,11 @@ if player 1 sends a bad `SWITCH`, player 2's already-locked-in move is kept.
   When the server re-enters this state from `CLEANUP`, still-connected players are
   kept and each is sent `LOBBY_WAIT`. A lobby player who disconnects is dropped.
   `MOVE`/`SWITCH` here return `ERROR OUT_OF_TURN`.
-- **Exit:** → `GAME_START` when two players are in the lobby.
+- **Lobby rotation:** the lobby is a FIFO queue ordered by arrival. A newly
+  connected player joins at the back. Players returning from `CLEANUP` re-enter at
+  the back in the order described under `CLEANUP`.
+- **Exit:** → `GAME_START` when two players are in the lobby. The **first two
+  players in the queue** start the next game.
 
 ### `GAME_START`
 - **Entry:** the second player joins.
@@ -197,6 +201,10 @@ if player 1 sends a bad `SWITCH`, player 2's already-locked-in move is kept.
 - **Work:**
   - **On a disconnect:** send the surviving player `GAME_OVER` with `result: "FORFEIT"` and `winner:` the survivor, then close the departed player's socket.
   - **Always:** clear the teams, pending actions, round counter, and per-player region state.
+  - **Lobby rotation:** the players who just finished and are still connected
+    re-enter the **back** of the lobby queue, **winner first, then loser**. On a
+    `DRAW` the order is `player1`, then `player2`. After a forfeit only the
+    survivor is still connected, so only the survivor re-enters.
 - **Exit:** → `WAITING_FOR_PLAYERS`, keeping any still-connected clients in the lobby for a rematch.
 
 ---
