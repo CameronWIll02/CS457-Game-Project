@@ -246,6 +246,8 @@ is the starting active Pokémon.
 
 > On the wire this is a single line. It is pretty-printed here only for readability.
 
+Sample stat values are illustrative; the implementation computes level-50 stats from base stats.
+
 ---
 
 ### 4.4 `MOVE`
@@ -384,9 +386,10 @@ to `WAITING_FOR_PLAYERS`.
 | Key | Type | Description |
 |---|---|---|
 | `type` | string | `"GAME_OVER"` |
-| `result` | string | `"WIN"` (a side ran out of usable Pokémon), `"DRAW"` (both sides ran out in the same round), or `"FORFEIT"` (the opponent disconnected). |
+| `result` | string | `"WIN"` (a side ran out of usable Pokémon), `"DRAW"` (both sides ran out in the same round, or round 50 resolved with both sides still having usable Pokémon), or `"FORFEIT"` (the opponent disconnected). |
 | `winner` | string \| null | Winning role (`"player1"` / `"player2"`), or `null` on a `DRAW`. |
 | `final_state` | object | `{ "round": int, "teams": { "player1": array[ActiveSummary], "player2": array[ActiveSummary] } }`. Every team member's final HP and status. |
+| `events` | array[string] | Ordered event log of the final round (empty for a `FORFEIT`). |
 | `record` | object | `{ "<player_name>": { "wins": int, "losses": int, "draws": int }, ... }` for both players. Match record including this game's result. |
 
 ```json
@@ -409,6 +412,11 @@ to `WAITING_FOR_PLAYERS`.
       ]
     }
   },
+  "events": [
+    "Gengar used Thunderbolt! Jolteon lost 43 HP.",
+    "Jolteon used Thunderbolt! Gengar lost 60 HP.",
+    "Gengar fainted!"
+  ],
   "record": {
     "Red": {"wins": 2, "losses": 1, "draws": 0},
     "Blue": {"wins": 1, "losses": 2, "draws": 0}
@@ -496,3 +504,5 @@ Rules for every send and receive path:
 ## Changelog
 
 - **Sprint 2:** added `STATE_UPDATE.remaining` and `GAME_OVER.record` for score synchronization.
+- **Sprint 3:** added 50-round cap DRAW condition (from SOW §1.2).
+- **Sprint 3:** added `GAME_OVER.events` so the final round's events reach both clients.

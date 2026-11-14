@@ -268,17 +268,223 @@ change them.
 
 ---
 
-## 5. Sprint 3 Prompt – Code Generation (Placeholder)
+## 5. Sprint 3 Prompt – Code Generation
 
-> **TODO (Sprint 3):** Insert the exact prompt used to constrain AI code generation.
+**Used to generate:** `server.py`, `client.py`, `protocol.py`, `game_engine.py`, `pokedex.py`, `tests/test_protocol.py`, `tests/test_game_engine.py`, `README.md`, the Sprint 3 round-cap edits to `docs/protocol_blueprint.md` and `docs/fsm_specification.md`, and this section of `docs/ai_prompts.md`
+**Constraint goal:** generated code must implement `protocol_blueprint.md`,
+`fsm_specification.md`, and `concurrency_design.md` exactly. That means no new message types, fields,
+error codes, or states (except the round-cap rule), and the same NDJSON framing and termination
+handling.
 
-**Will be used to generate:** *TBD (e.g. `server.py`, `client.py`, `protocol.py`, `game_engine.py`)*
-**Constraint goal:** generated code must implement `protocol_blueprint.md` and
-`fsm_specification.md` exactly. That means no new message types, fields, error codes, or
-states, and the same NDJSON framing and termination handling.
+**Design ownership:** I made these decisions **before I wrote the prompt below**:
+
+- the protocol (message types, fields, error codes, NDJSON framing),
+- the FSM (states, per-player readiness regions, forfeit and rematch rules),
+- the concurrency design (thread-per-client, one `game_lock`, send-under-lock
+  broadcasts, deferred forfeit handling, FIFO lobby rotation),
+- the client UX flow (message-driven prompts, numbered choices, `q` / Ctrl-C to leave),
+- the 50-round cap `DRAW` rule (from my Sprint 0 SOW),
+- the PAR/SLP-only status scope.
+
+The AI's job was to implement those decisions as code, not to make them.
 
 ```text
-<Sprint 3 prompt goes here>
+I'm implementing Sprint 3 of my CS 457 Computer Networks project: a Gen 1 Pokémon
+battle simulator over TCP. Read these first; they are the spec and the code must
+follow them exactly:
+- docs/protocol_blueprint.md (messages, fields, error codes, NDJSON framing,
+  termination handling)
+- docs/fsm_specification.md (server states and transitions, edge-case table)
+- docs/concurrency_design.md (threading model, game_lock rules, race handling)
+- sow_template.md (game rules)
+
+Do NOT invent new message types, fields, error codes, or FSM states, except the
+single round-cap change in TASK 4. If something in the spec is ambiguous, pick the
+simplest reading, implement it, and list it in your final summary.
+
+=== TASK 1: Project structure (Python 3, standard library only) ===
+- protocol.py: send_line(conn, obj) -> bool (NDJSON encode + sendall, catches
+  BrokenPipeError/ConnectionResetError/ConnectionAbortedError and returns False),
+  and a LineBuffer class that accumulates recv() bytes and yields complete
+  decoded JSON objects, with the 64 KiB max-line guard from the blueprint.
+  Malformed lines must surface as a parse error the server turns into
+  ERROR MALFORMED_MESSAGE, never an exception that kills the thread.
+- pokedex.py: curated data for ~15 Gen 1 species (accurate Gen 1 base stats:
+  hp, attack, defense, special, speed; Gen 1 types) and their small movesets
+  (2-4 moves each, accurate Gen 1 type/power/accuracy). Include at least the
+  species used in the blueprint samples (Charizard, Jolteon, Snorlax,
+  Blastoise, Alakazam, Gengar). Include the Gen 1 type chart, including the
+  Gen 1 quirk that Ghost-type moves have no effect on Psychic.
+- game_engine.py: pure game logic, no sockets. Team generation (3 random
+  distinct species per player at fixed level 50), Gen 1 stat calculation at
+  level 50 from base stats only (no DVs/stat exp), simplified Gen 1 damage
+  formula (level, power, attack/defense or special/special, STAB 1.5x, type
+  effectiveness, random factor 217-255/255, accuracy check; no crits), speed
+  ordering (tie: player1 first), faint marking, remaining counts, win/draw
+  check. Status: implement only PAR (speed quartered, 25% chance to skip turn)
+  and SLP (1-3 turns asleep, can't move). Thunder Wave (fails on Ground
+  types) and Hypnosis are the only status moves. Leave other status values
+  in the enum but unused. Every event appends a short human-readable line to
+  the round's events list.
+- server.py: networking, FSM, and concurrency exactly per
+  concurrency_design.md: main thread accept() loop spawning daemon worker
+  threads; recv() outside game_lock; every state access and every socket
+  write under `with game_lock:`; broadcasts sent while holding the lock;
+  send failures recorded and handled by on_player_left() after the lock is
+  released; on_player_left() idempotent; FIFO lobby queue with the rematch
+  rotation rule; roles by queue order; match record keyed by player_name.
+  Log each FSM transition and each received/sent message type to stdout with
+  a timestamp so the console doubles as the execution log.
+- client.py: see TASK 3.
+- tests/test_protocol.py: unittest tests for LineBuffer covering
+  fragmentation (one message split across chunks), coalescing (several
+  messages in one chunk), both at once (the 3-recv() example from the
+  blueprint §2.3), and an oversize line.
+- tests/test_game_engine.py: a few unittest tests: type effectiveness incl.
+  Ghost vs Psychic = 0, speed ordering, faint and remaining counts,
+  round-cap draw.
+- README.md: how to run server, two clients, and the tests.
+
+=== TASK 2: CLI arguments (argparse) ===
+- server.py: -p PORT required; -h help. Bind to 0.0.0.0. Validate port is an
+  integer in 1024-65535; on failure print a clear message plus usage and
+  exit(1). Set SO_REUSEADDR.
+- client.py: -i HOSTNAME required, -p PORT required, -h help. Same port
+  validation. Resolve with socket.gethostbyname(args.hostname). Catch
+  socket.gaierror and print, with no traceback:
+    [ERROR] Unable to resolve DNS hostname '<name>'.
+    Please check your Cisco router DNS configuration ('ip dns server' /
+    'ip host') or verify domain spelling.
+  then sys.exit(1). Also catch ConnectionRefusedError / TimeoutError /
+  OSError on connect with a friendly message and exit(1). No hardcoded IPs
+  anywhere. Help text example: python3 client.py -i server.will.edu -p 8080
+
+=== TASK 3: Client UI ===
+- Single-threaded and message-driven: block on recv(), run messages through
+  LineBuffer, and only prompt for input when the latest STATE_UPDATE's
+  awaiting[my_role] is "MOVE" or "SWITCH".
+- Prompt for a player name, send CONNECT.
+- LOBBY_WAIT: print "Waiting for an opponent...".
+- GAME_START: show my role, my team, and the opponent's team.
+- STATE_UPDATE: clear, readable display: round number, the events log, both
+  active Pokémon with an HP bar like [#######---] 31/78 and status, the
+  remaining count per side as the score, then either "Your turn: choose a
+  move" with a numbered move list, "Your Pokémon fainted: choose a
+  replacement" with a numbered list of non-fainted team members, or
+  "Waiting for <opponent>...". Input is a number; re-prompt locally on
+  invalid input before sending anything.
+- ERROR: print the detail and re-prompt for the same action.
+- GAME_OVER: show the result, winner, final teams, and the match record,
+  then return to waiting for the lobby (rematch rotation).
+- Typing "q" at any prompt, or Ctrl-C, sends DISCONNECT and exits cleanly.
+- If the server connection drops (EOF or socket exception), print
+  "Connection to server lost." and exit cleanly, no traceback.
+
+=== TASK 4: Round-cap draw (the only spec change) ===
+My Sprint 0 SOW defines a draw as reaching a 50-round cap with both sides
+still having usable Pokémon. Implement it in CHECK_WIN_DRAW: if round 50
+resolves and neither side has run out, the result is DRAW, winner null.
+Update docs/protocol_blueprint.md GAME_OVER result description and the
+fsm_specification.md CHECK_WIN_DRAW walkthrough to include this rule, and
+add a Changelog line: "Sprint 3: added 50-round cap DRAW condition (from
+SOW §1.2)." Make the cap a named constant.
+
+=== TASK 5: docs/ai_prompts.md ===
+Replace the Sprint 3 placeholder with this exact prompt. Add an ownership
+note: protocol, FSM, concurrency design, client UX flow, round-cap rule,
+and the PAR/SLP-only status scope were my decisions before this prompt.
+Fill "Notes / deviations" with any spec ambiguities you resolved.
+
+=== Verification before you finish ===
+- Run all tests and make them pass.
+- Start the server on a free port and drive two clients from a script
+  (subprocess with piped stdin) through at least 3 rounds, to confirm the
+  game works end to end. Fix anything that breaks. Don't commit the script.
+- Confirm `python3 client.py -i doesnotexist.invalid -p 8080` prints the
+  friendly DNS error and exits with status 1.
+- Confirm bad ports (e.g. -p 80, -p abc) are rejected on both programs.
+- Run a PEP 8 check (pycodestyle or flake8 if available) and fix issues.
+Don't commit. Summarize what you built and any deviations.
 ```
 
-**Notes / deviations from the generated code:** *TBD*
+**Notes / deviations from the generated code:**
+
+*Inputs*
+
+- The implementation's game rules were checked against `sow_template.md` and
+  match it. A team size of 3 is a deliberate choice; the SOW's 6 was an
+  example.
+
+*Game rules*
+
+- **Stats are level-50 values.** `GAME_START` sends the stats calculated at
+  level 50, not raw base stats. For example, Charizard has `max_hp` 138, not the 78
+  shown in the blueprint sample.
+- **Physical vs special is decided by move type**, as in Gen 1.
+- **Every hit does at least 1 damage**, unless the type chart gives 0x.
+- **Sleep lasts 1–3 turns.** The Pokémon loses that many turns. On the last one
+  it wakes up ("X woke up!") but still does not move that turn.
+- **Status moves can fail.** Thunder Wave and Hypnosis still roll for accuracy,
+  and they fail ("But it failed!") on a target that already has a status.
+  Thunder Wave also fails on Ground types ("It doesn't affect X...").
+- **No secondary effects.** Damaging moves never cause status, flinch, or
+  recoil (for example Body Slam never paralyzes).
+- **The roster has 17 species.** Movesets are curated and do not always match
+  real Gen 1 learnsets. Gengar has Lick as a third move so that a Ghost-type
+  attack exists.
+
+*Server handling of unspecified cases*
+
+- **Server-to-client message types sent by a client** (for example
+  `GAME_OVER`) count as unknown types, so they get `MALFORMED_MESSAGE`.
+- **Any message before `CONNECT`, or a second `CONNECT`,** gets `OUT_OF_TURN`.
+- **A `player_name` outside 1–20 characters** gets `MALFORMED_MESSAGE`.
+- **Rematches start automatically.** When the server re-enters
+  `WAITING_FOR_PLAYERS`, every lobby member gets `LOBBY_WAIT`, and `GAME_START`
+  follows right away if two or more are queued.
+- **After a forfeit, only the survivor re-enters the queue.**
+- **A player whose send failed during the critical section that runs
+  `CLEANUP` is not put back in the queue.**
+- **`on_player_left()` also shuts down the departed socket,** following the
+  FSM's "close the departed player's socket". This wakes that player's worker
+  thread if it is blocked in `recv()`.
+- **Oversize lines.** After reporting an oversize partial line, `LineBuffer`
+  skips the rest of that line up to its newline, so the tail is not reported
+  as a second error. A complete line over 64 KiB is also rejected.
+- **The last round's events are not sent to clients.** On `WIN` / `DRAW`,
+  `GAME_OVER` replaces `STATE_UPDATE` (per the FSM), and `GAME_OVER` has no
+  `events` field. Clients therefore never see that round's events (the server
+  log still has them). I left this alone because adding a field is out of scope.
+
+*Client and CLI*
+
+- **Stale-prompt guard.** The client remembers the `(round, action)` it last
+  sent. That way, a `STATE_UPDATE` that was built before its action reached the
+  server does not prompt it again.
+- **Exit status.** Connection lost exits with status 1. `q` and Ctrl-C exit
+  with status 0.
+- **An `ERROR` that arrives after `GAME_OVER`** is shown as a short note rather
+  than as an error.
+- **All argument errors exit with status 1,** including missing arguments.
+  argparse's default would be 2.
+
+*Docs*
+
+- **The FSM state-diagram labels for `CHECK_WIN_DRAW` were not updated** for
+  the round cap. Only the walkthrough was, as the prompt asked.
+
+*Sprint 3 follow-ups (requested after the first code generation)*
+
+- **Added `GAME_OVER.events`.** It carries the final round's event lines, and
+  is empty for a `FORFEIT`. `server.py` fills it in, `client.py` prints it before
+  the result, and the blueprint key table, sample payload, and Changelog cover
+  it. The `GAME_OVER` arrows in the `concurrency_design.md` sequence diagram now
+  include it. This resolves the "last round's events are not sent to clients"
+  note above. `tests/test_server.py` checks it for a `WIN` and a `FORFEIT`,
+  using fake sockets.
+- **Changed the FSM diagram label** `CHECK_WIN_DRAW --> GAME_OVER` to "one
+  side out of usable Pokemon (WIN), or both out / round cap reached (DRAW)".
+  This resolves the "diagram labels not updated" note above.
+- **Added a note under the `GAME_START` sample in the blueprint** saying that
+  sample stat values are illustrative and the implementation computes level-50
+  stats from base stats.

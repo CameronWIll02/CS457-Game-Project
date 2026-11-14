@@ -63,7 +63,7 @@ stateDiagram-v2
     EVALUATE_ROUND --> CHECK_FAINT : speed order, damage and status applied
     CHECK_FAINT --> CHECK_WIN_DRAW : fainted actives marked FNT
     CHECK_WIN_DRAW --> READINESS : both sides have a usable Pokemon, round++, broadcast STATE_UPDATE
-    CHECK_WIN_DRAW --> GAME_OVER : a side has no usable Pokemon, WIN or DRAW
+    CHECK_WIN_DRAW --> GAME_OVER : one side out of usable Pokemon (WIN), or both out / round cap reached (DRAW)
 
     GAME_START --> CLEANUP : player disconnects, opponent wins by FORFEIT
     READINESS --> CLEANUP : player disconnects, opponent wins by FORFEIT
@@ -183,6 +183,8 @@ if player 1 sends a bad `SWITCH`, player 2's already-locked-in move is kept.
 - **Work:** count each side's non-fainted Pokémon.
   - Both sides at zero → `DRAW`.
   - One side at zero → `WIN` for the other side.
+  - Both sides still have a usable Pokémon and the round that just resolved
+    is round 50 (the round cap, `ROUND_CAP`) → `DRAW`, `winner: null`.
   - Otherwise the game continues.
 
   This check runs **before** any switch prompt, because a player whose last

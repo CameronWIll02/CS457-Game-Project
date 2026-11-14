@@ -386,7 +386,7 @@ sequenceDiagram
             S->>C2: STATE_UPDATE (identical payload, same remaining counts)
         else a side has no Pokemon left
             Note over S: update match record once
-            S->>C1: GAME_OVER (result, winner, final_state, record)
+            S->>C1: GAME_OVER (result, winner, final_state, events, record)
             S->>C2: GAME_OVER (identical payload)
             Note over S: CLEANUP, then WAITING_FOR_PLAYERS
         end
